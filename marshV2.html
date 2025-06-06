@@ -1,0 +1,454 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+  <meta charset="UTF-8">
+  <title>Marshmallow Scape</title>
+  <style>
+    /* Remove margens e centraliza o canvas */
+    body {
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      background: #000;
+    }
+    #gameCanvas {
+      display: block;
+      margin: 0 auto;
+      background: #000; /* Fallback preto se o background não carregar */
+    }
+    /* Tela de Game Over, inicialmente oculta */
+    #gameOverScreen {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      background: rgba(0, 0, 0, 0.8);
+      color: #fff;
+      padding: 20px;
+      text-align: center;
+      font-family: sans-serif;
+      display: none;
+    }
+    #restartButton {
+      padding: 10px 20px;
+      font-size: 18px;
+      cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+  <!-- Canvas do jogo -->
+  <canvas id="gameCanvas" width="1280" height="720"></canvas>
+
+  <!-- Tela de Game Over -->
+  <div id="gameOverScreen">
+    <h1>Game Over</h1>
+    <p>Tempo: <span id="finalTime">0</span>s</p>
+    <p>Pontos bônus: <span id="finalBonus">0</span></p>
+    <p>Total: <span id="finalTotal">0</span></p>
+    <button id="restartButton">Reiniciar</button>
+  </div>
+
+  <script>
+    // ==== 1) VARIÁVEIS GLOBAIS E CARREGAMENTO DE IMAGENS ====
+    const canvas = document.getElementById("gameCanvas");
+    const ctx    = canvas.getContext("2d");
+    const W = canvas.width, H = canvas.height;
+
+    // Interface
+    const gameOverScreen = document.getElementById('gameOverScreen');
+    const restartButton  = document.getElementById('restartButton');
+    const finalTime      = document.getElementById('finalTime');
+    const finalBonus     = document.getElementById('finalBonus');
+    const finalTotal     = document.getElementById('finalTotal');
+
+    // Sprites (caminhos genéricos)
+    const bgImg       = new Image(); bgImg.src       = './sprites/background.png';
+    const playerImg   = new Image(); playerImg.src   = './sprites/marshmallow.png';   // marshmallow
+    const fireImg     = new Image(); fireImg.src     = './sprites/fire.png';
+    const platformImg = new Image(); platformImg.src = './sprites/platform.png';
+    // (Você pode adicionar um sprite de coletável se quiser:)
+    // const itemImg = new Image(); itemImg.src = './sprites/item.png';
+
+    // Estado de jogo
+    let gameOver    = false;
+    let startTime   = Date.now();
+    let cameraX     = 0;       // deslocamento do “mundo” para a esquerda
+    let lastTopX    = 0;       // X do início da última plataforma superior
+    let lastBotEnd  = 0;       // X do fim do último segmento do piso
+    let bonusScore  = 0;       // Pontos ganhos por coletáveis
+
+    // Marshmallow (jogador) em “coordenadas de mundo”
+    const player = {
+      x: 800,    // posição inicial (mundo)
+      y: 600,
+      width: 40,
+      height: 40,
+      vx: 0,
+      vy: 0,
+      speed: 4.4,     // velocidade ajustada
+      jumpPower: -12, // pulo ajustado
+      jumping: false
+    };
+
+    // Fogo (inimigo) em “coordenadas de mundo”
+    const fire = {
+      x: 50,
+      y: 600,
+      width: 80,
+      height: 80,
+      vx: 0,
+      vy: 0,
+      speed: 4.3,     // velocidade ajustada
+      jumping: false
+    };
+
+    // Arrays para plataformas e coletáveis
+    const topPlatforms    = []; // plataformas “de cima” (400 ≤ y ≤ 650)
+    const bottomPlatforms = []; // segmentos do piso (y ≈ 680)
+    const collectibles     = []; // coletáveis (+5 pontos) com { x, y, width, height }
+
+    // Captura de teclas
+    const keys = {};
+    document.addEventListener('keydown', e => { keys[e.code] = true; });
+    document.addEventListener('keyup',   e => { keys[e.code] = false; });
+
+    // ==== 2) FUNÇÃO DE COLISÃO AABB ====
+    function checkCollision(a, b) {
+      return a.x < b.x + b.width &&
+             a.x + a.width > b.x &&
+             a.y < b.y + b.height &&
+             a.y + a.height > b.y;
+    }
+
+    // ==== 3) GERAÇÃO INICIAL DE PLATAFORMAS E COLETÁVEIS ====
+    function initPlatforms() {
+      topPlatforms.length    = 0;
+      bottomPlatforms.length = 0;
+      collectibles.length    = 0;
+      lastTopX   = 0;
+      lastBotEnd = 0;
+      bonusScore = 0;
+
+      // 3.1) Piso inicial (vários segmentos até x = 2000)
+      const floorY      = 680; // um pouco acima da borda (H = 720)
+      const floorHeight = 20;
+      let botX = 0;
+      while (botX < 2000) {
+        // largura do segmento do piso: [150, 300]
+        const wSeg = 150 + Math.random() * 150;
+        bottomPlatforms.push({ x: botX, y: floorY, width: wSeg, height: floorHeight });
+        lastBotEnd = botX + wSeg;
+        // **buraco** entre [30, 70]
+        botX = lastBotEnd + (30 + Math.random() * 40);
+      }
+
+      // 3.2) Plataformas “de cima” iniciais (5 blocos após x = 2000)
+      let topX = 2000 + (50 + Math.random() * 50);
+      for (let i = 0; i < 5; i++) {
+        const w = 150 + Math.random() * 100;     // largura [150, 250]
+        const y = 400 + Math.random() * 250;     // y entre [400, 650]
+        topPlatforms.push({ x: topX, y: y, width: w, height: 20 });
+
+        // 30% de chance de ter um coletável no centro dessa plataforma
+        if (Math.random() < 0.3) {
+          const collectSize = 20;
+          const cx = topX + w / 2 - collectSize / 2;
+          const cy = y - collectSize; // logo acima da plataforma
+          collectibles.push({ x: cx, y: cy, width: collectSize, height: collectSize });
+        }
+
+        lastTopX = topX;
+        topX = topX + w + (200 + Math.random() * 150); // gap [200, 350]
+      }
+    }
+
+    // ==== 4) GERAÇÃO DINÂMICA DE MAIS PLATAFORMAS E COLETÁVEIS ====
+    function generatePlatformsIfNeeded() {
+      // 4.1) Gerar novos segmentos de piso se o jogador se aproximar do fim
+      const floorY      = 680;
+      const floorHeight = 20;
+      while (lastBotEnd < player.x + 1000) {
+        const wSeg = 150 + Math.random() * 150;
+        const gap = 30 + Math.random() * 40; // buraco [30, 70]
+        const newX = lastBotEnd + gap;
+        bottomPlatforms.push({ x: newX, y: floorY, width: wSeg, height: floorHeight });
+        lastBotEnd = newX + wSeg;
+      }
+
+      // 4.2) Gerar novas plataformas de cima (e coletáveis)
+      while (lastTopX < player.x + 1000) {
+        const gap = 200 + Math.random() * 150;   // gap [200, 350]
+        const w   = 150 + Math.random() * 100;   // largura [150, 250]
+        const y   = 400 + Math.random() * 250;   // y [400, 650]
+        const newX = lastTopX + gap;
+        topPlatforms.push({ x: newX, y: y, width: w, height: 20 });
+
+        // 30% de chance de ter coletável aqui
+        if (Math.random() < 0.3) {
+          const collectSize = 20;
+          const cx = newX + w / 2 - collectSize / 2;
+          const cy = y - collectSize;
+          collectibles.push({ x: cx, y: cy, width: collectSize, height: collectSize });
+        }
+
+        lastTopX = newX;
+      }
+    }
+
+    // ==== 5) RESET DO JOGO ====
+    function resetGame() {
+      gameOver = false;
+      startTime = Date.now();
+
+      // Reposiciona player e fogo em “coordenadas de mundo”
+      player.x = 300;
+      player.y = 600;
+      player.vx = 0;
+      player.vy = 0;
+      player.jumping = false;
+
+      fire.x = 50;
+      fire.y = 600;
+      fire.vx = 0;
+      fire.vy = 0;
+      fire.jumping = false;
+
+      cameraX = 0;
+      initPlatforms();
+      gameOverScreen.style.display = 'none';
+      requestAnimationFrame(update);
+    }
+
+    restartButton.addEventListener('click', resetGame);
+
+    // ==== 6) LOOP PRINCIPAL (UPDATE) ====
+    function update() {
+      if (gameOver) return;
+
+      // --- 6.1) MOVIMENTO DO PLAYER ---
+      if (keys['ArrowLeft']) player.vx = -player.speed;
+      else if (keys['ArrowRight']) player.vx = player.speed;
+      else player.vx = 0;
+
+      if ((keys['Space'] || keys['ArrowUp']) && !player.jumping) {
+        player.vy = player.jumpPower;
+        player.jumping = true;
+      }
+
+      const gravity = 0.5;
+      player.vy += gravity;
+      player.x += player.vx;
+      player.y += player.vy;
+
+      // Não permite sair da tela à esquerda
+      if (player.x < 0) player.x = 0;
+
+      // --- 6.2) Colisão do jogador com TODAS as plataformas ---
+      let onPlatform = false;
+
+      // 6.2.1) Verifica colisão com bottomPlatforms (piso)
+      for (const plat of bottomPlatforms) {
+        if (checkCollision(
+              { x: player.x, y: player.y, width: player.width, height: player.height },
+              { x: plat.x,   y: plat.y,   width: plat.width,  height: plat.height }
+            )) {
+          if (player.vy >= 0 && player.y + player.height - player.vy <= plat.y) {
+            player.y = plat.y - player.height;
+            player.vy = 0;
+            player.jumping = false;
+            onPlatform = true;
+          }
+        }
+      }
+      // 6.2.2) Verifica colisão com topPlatforms
+      for (const plat of topPlatforms) {
+        if (checkCollision(
+              { x: player.x, y: player.y, width: player.width, height: player.height },
+              { x: plat.x,   y: plat.y,   width: plat.width,  height: plat.height }
+            )) {
+          if (player.vy >= 0 && player.y + player.height - player.vy <= plat.y) {
+            player.y = plat.y - player.height;
+            player.vy = 0;
+            player.jumping = false;
+            onPlatform = true;
+          }
+        }
+      }
+
+      // Se não estiver em nenhuma plataforma e ultrapassar o fundo (y + height > H), morre
+      if (!onPlatform && player.y + player.height > H) {
+        gameOver = true;
+        const survived = Math.floor((Date.now() - startTime) / 1000);
+        finalTime.textContent  = survived;
+        finalBonus.textContent = bonusScore;
+        finalTotal.textContent = survived + bonusScore;
+        gameOverScreen.style.display = 'block';
+        return;
+      }
+
+      // --- 6.3) Coleta itens ---
+      for (let i = collectibles.length - 1; i >= 0; i--) {
+        const item = collectibles[i];
+        if (checkCollision(
+               { x: player.x, y: player.y, width: player.width, height: player.height },
+               { x: item.x,   y: item.y,   width: item.width,  height: item.height }
+             )) {
+          // Pegou o coletável
+          bonusScore += 5;
+          collectibles.splice(i, 1);
+        }
+      }
+
+      // --- 6.4) MOVIMENTO DO FOGO (inimigo) ---
+      if (player.x + player.width / 2 > fire.x + fire.width / 2) {
+        fire.vx = fire.speed;
+      } else {
+        fire.vx = -fire.speed;
+      }
+
+      // Pulo aleatório (2% de chance) só se player estiver acima
+      if (!fire.jumping && player.y < fire.y && Math.random() < 0.02) {
+        fire.vy = -12;  // salto alto
+        fire.jumping = true;
+      }
+
+      fire.vy += gravity;
+      fire.x += fire.vx;
+      fire.y += fire.vy;
+
+      // Colisão do fogo com bottomPlatforms (piso)
+      for (const plat of bottomPlatforms) {
+        if (checkCollision(
+              { x: fire.x, y: fire.y, width: fire.width, height: fire.height },
+              { x: plat.x,   y: plat.y,   width: plat.width,  height: plat.height }
+            )) {
+          if (fire.vy >= 0 && fire.y + fire.height - fire.vy <= plat.y) {
+            fire.y = plat.y - fire.height;
+            fire.vy = 0;
+            fire.jumping = false;
+          }
+        }
+      }
+      // Colisão do fogo com topPlatforms
+      for (const plat of topPlatforms) {
+        if (checkCollision(
+              { x: fire.x, y: fire.y, width: fire.width, height: fire.height },
+              { x: plat.x,   y: plat.y,   width: plat.width,  height: plat.height }
+            )) {
+          if (fire.vy >= 0 && fire.y + fire.height - fire.vy <= plat.y) {
+            fire.y = plat.y - fire.height;
+            fire.vy = 0;
+            fire.jumping = false;
+          }
+        }
+      }
+      // Se fogo cair abaixo da tela, “chão” fictício
+      if (fire.y + fire.height > H) {
+        fire.y = H - fire.height;
+        fire.vy = 0;
+        fire.jumping = false;
+      }
+
+      // --- 6.5) GERAR NOVAS PLATAFORMAS E COLETÁVEIS SE NECESSÁRIO ---
+      generatePlatformsIfNeeded();
+
+      // --- 6.6) CHECAR COLISÃO PLAYER x FOGO (GAME OVER) ---
+      if (checkCollision(player, fire)) {
+        gameOver = true;
+        const survived = Math.floor((Date.now() - startTime) / 1000);
+        finalTime.textContent  = survived;
+        finalBonus.textContent = bonusScore;
+        finalTotal.textContent = survived + bonusScore;
+        gameOverScreen.style.display = 'block';
+        return;
+      }
+
+      // --- 6.7) ATUALIZA cameraX E DESENHA (CALL draw) ---
+      cameraX = Math.max(0, player.x - 200);
+      draw();
+      requestAnimationFrame(update);
+    }
+
+    // ==== 7) FUNÇÃO draw: DESENHA TUDO COM OFFSET cameraX ====
+    function draw() {
+      // 7.1) Fundo (background)
+      if (bgImg.complete && bgImg.naturalWidth !== 0) {
+        ctx.drawImage(bgImg, 0, 0, W, H);
+      } else {
+        ctx.fillStyle = '#000';
+        ctx.fillRect(0, 0, W, H);
+      }
+
+      // 7.2) Desenha todos os segmentos do piso (bottomPlatforms)
+      for (const plat of bottomPlatforms) {
+        const screenX = plat.x - cameraX;
+        if (screenX + plat.width >= 0 && screenX <= W) {
+          if (platformImg.complete && platformImg.naturalWidth !== 0) {
+            ctx.drawImage(platformImg, screenX, plat.y, plat.width, plat.height);
+          } else {
+            ctx.fillStyle = '#555';
+            ctx.fillRect(screenX, plat.y, plat.width, plat.height);
+          }
+        }
+      }
+
+      // 7.3) Desenha todas as plataformas de cima (topPlatforms)
+      for (const plat of topPlatforms) {
+        const screenX = plat.x - cameraX;
+        if (screenX + plat.width >= 0 && screenX <= W) {
+          if (platformImg.complete && platformImg.naturalWidth !== 0) {
+            ctx.drawImage(platformImg, screenX, plat.y, plat.width, plat.height);
+          } else {
+            ctx.fillStyle = '#555';
+            ctx.fillRect(screenX, plat.y, plat.width, plat.height);
+          }
+        }
+      }
+
+      // 7.4) Desenha todos os coletáveis
+      for (const item of collectibles) {
+        const itemX = item.x - cameraX;
+        // Desenha um quadrado amarelo no lugar
+        ctx.fillStyle = '#ff0';
+        ctx.fillRect(itemX, item.y, item.width, item.height);
+        // Se você tiver um sprite, substitua por:
+        // if (itemImg.complete && itemImg.naturalWidth !== 0) {
+        //   ctx.drawImage(itemImg, itemX, item.y, item.width, item.height);
+        // }
+      }
+
+      // 7.5) Desenha o jogador (marshmallow)
+      const playerScreenX = player.x - cameraX;
+      if (playerImg.complete && playerImg.naturalWidth !== 0) {
+        ctx.drawImage(playerImg, playerScreenX, player.y, player.width, player.height);
+      } else {
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(playerScreenX, player.y, player.width, player.height);
+      }
+
+      // 7.6) Desenha o fogo (inimigo)
+      const fireScreenX = fire.x - cameraX;
+      if (fireImg.complete && fireImg.naturalWidth !== 0) {
+        ctx.drawImage(fireImg, fireScreenX, fire.y, fire.width, fire.height);
+      } else {
+        ctx.fillStyle = '#f00';
+        ctx.fillRect(fireScreenX, fire.y, fire.width, fire.height);
+      }
+
+      // 7.7) Pontuação (tempo + bônus + total)
+      const survived = Math.floor((Date.now() - startTime) / 1000);
+      const total    = survived + bonusScore;
+      ctx.fillStyle = '#fff';
+      ctx.font = '20px sans-serif';
+      ctx.fillText(`Tempo: ${survived}s`, 10, 30);
+      ctx.fillText(`Bônus: ${bonusScore}`, 10, 60);
+      ctx.fillText(`Total: ${total}`, 10, 90);
+    }
+
+    // ==== 8) INICIA O JOGO IMEDIATAMENTE ====
+    resetGame();
+
+  </script>
+</body>
+</html>
